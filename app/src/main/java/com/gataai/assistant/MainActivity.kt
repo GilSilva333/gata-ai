@@ -3,6 +3,7 @@ package com.gataai.assistant
 
 import android.Manifest
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
@@ -17,6 +18,8 @@ import android.widget.ScrollView
 import android.widget.TextView
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import com.gataai.assistant.core.ConversationMemory
+import com.gataai.assistant.core.MemoryStore
 import java.util.Locale
 
 class MainActivity : Activity(), TextToSpeech.OnInitListener {
@@ -28,11 +31,24 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private lateinit var status: TextView
     private lateinit var conversation: TextView
 
-    private val history = mutableListOf<String>()
-    private var lastUserMessage = ""
+    private lateinit var memoryStore: MemoryStore
+
+    private val memory = ConversationMemory()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        memoryStore = MemoryStore(this)
+
+        val savedMessages = memoryStore.loadConversation()
+
+        savedMessages.forEach { message ->
+            if (message.role == "user") {
+                memory.addUserMessage(message.content)
+            } else if (message.role == "assistant") {
+                memory.addAssistantMessage(message.content)
+            }
+        }
 
         tts = TextToSpeech(this, this)
 
@@ -56,7 +72,6 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         }
 
         conversation = TextView(this).apply {
-            text = "Gata: Oiii! Podemos conversar."
             textSize = 18f
             setPadding(12, 12, 12, 12)
         }
@@ -72,18 +87,31 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             }
         }
 
+        val clearButton = Button(this).apply {
+            text = "🗑️ Apagar histórico"
+            setOnClickListener {
+                confirmClearHistory()
+            }
+        }
+
         layout.addView(title)
         layout.addView(status)
-        layout.addView(scroll,
+
+        layout.addView(
+            scroll,
             LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 0,
                 1f
             )
         )
+
         layout.addView(button)
+        layout.addView(clearButton)
 
         setContentView(layout)
+
+        updateConversation()
 
         requestMicrophonePermission()
     }
@@ -119,7 +147,9 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             }
 
             override fun onBeginningOfSpeech() {}
+
             override fun onRmsChanged(rmsdB: Float) {}
+
             override fun onBufferReceived(buffer: ByteArray?) {}
 
             override fun onEndOfSpeech() {
@@ -144,6 +174,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             }
 
             override fun onPartialResults(partialResults: Bundle?) {}
+
             override fun onEvent(eventType: Int, params: Bundle?) {}
         })
     }
@@ -169,10 +200,12 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                 RecognizerIntent.EXTRA_LANGUAGE_MODEL,
                 RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
             )
+
             putExtra(
                 RecognizerIntent.EXTRA_LANGUAGE,
                 "pt-BR"
             )
+
             putExtra(
                 RecognizerIntent.EXTRA_PREFER_OFFLINE,
                 true
@@ -189,8 +222,9 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
 
     private fun respondTo(message: String) {
 
-        val previousMessage = lastUserMessage
-        lastUserMessage = message
+        val previousMessage = memory.getMessages()
+            .lastOrNull { it.role == "user" }
+            ?.content ?: ""
 
         val input = message.lowercase(Locale.ROOT)
 
@@ -221,7 +255,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             input.contains("lembras") ||
             input.contains("lembraste") ->
                 if (previousMessage.isNotEmpty()) {
-                    "Sim, nesta conversa lembro-me de teres dito: $previousMessage"
+                    "Sim, lembro-me de teres dito: $previousMessage"
                 } else {
                     "Ainda estamos a começar a nossa conversa!"
                 }
@@ -249,21 +283,55 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                 "Entendi. Conta-me mais sobre isso, quero compreender melhor o que estás a dizer."
         }
 
-        addToMemory("Tu: $message")
-        addToMemory("Gata: $answer")
+        memory.addUserMessage(message)
+        memory.addAssistantMessage(answer)
 
-        conversation.text = history.joinToString("\n\n")
+        memoryStore.saveConversation(memory.getMessages())
+
+        updateConversation()
+
         status.text = "Conversa ativa ❤️"
 
         speak(answer)
     }
 
-    private fun addToMemory(line: String) {
-        history.add(line)
+    private fun updateConversation() {
 
-        while (history.size > 16) {
-            history.removeAt(0)
+        val messages = memory.getMessages()
+
+        conversation.text = if (messages.isEmpty()) {
+            "Gata: Oiii! Podemos conversar."
+        } else {
+            messages.joinToString("\n\n") { message ->
+                val speaker = if (message.role == "user") {
+                    "Tu"
+                } else {
+                    "Gata"
+                }
+
+                "$speaker: ${message.content}"
+            }
         }
+    }
+
+    private fun confirmClearHistory() {
+
+        AlertDialog.Builder(this)
+            .setTitle("Apagar histórico?")
+            .setMessage(
+                "Queres mesmo apagar todas as mensagens guardadas?"
+            )
+            .setNegativeButton("Cancelar", null)
+            .setPositiveButton("Apagar") { _, _ ->
+
+                memory.clear()
+                memoryStore.clearConversation()
+
+                updateConversation()
+
+                status.text = "Histórico apagado ❤️"
+            }
+            .show()
     }
 
     private fun speak(message: String) {
@@ -279,6 +347,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
 
     override fun onInit(statusCode: Int) {
         if (statusCode == TextToSpeech.SUCCESS) {
+
             val result = tts?.setLanguage(
                 Locale("pt", "BR")
             )
@@ -312,6 +381,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         recognizer?.destroy()
         tts?.stop()
         tts?.shutdown()
+
         super.onDestroy()
     }
 }
