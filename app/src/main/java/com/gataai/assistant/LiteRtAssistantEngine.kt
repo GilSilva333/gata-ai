@@ -17,7 +17,7 @@ import java.io.File
 import java.util.concurrent.Executors
 
 class LiteRtAssistantEngine(
-    context: Context
+    private val context: Context
 ) : AssistantEngine {
 
     private val modelFile = File(
@@ -60,7 +60,6 @@ class LiteRtAssistantEngine(
                 ready = true
 
                 true
-
             } catch (e: Exception) {
                 ready = false
                 false
@@ -117,9 +116,12 @@ class LiteRtAssistantEngine(
         )
 
         activeEngine.createConversation(config).use { chat ->
-            val answer = chat.sendMessage(
+
+            val response = chat.sendMessage(
                 conversation[lastUserIndex].content
-            ).text
+            )
+
+            val answer = response.toString()
 
             answer.ifBlank {
                 "Desculpa, tive dificuldade em formular uma resposta."
@@ -132,7 +134,6 @@ class LiteRtAssistantEngine(
     override fun release() {
         runBlocking(dispatcher) {
             ready = false
-
             engine?.close()
             engine = null
         }
