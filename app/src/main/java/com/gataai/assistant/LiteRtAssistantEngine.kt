@@ -9,7 +9,6 @@ import com.google.ai.edge.litertlm.ConversationConfig
 import com.google.ai.edge.litertlm.Engine
 import com.google.ai.edge.litertlm.EngineConfig
 import com.google.ai.edge.litertlm.Message
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
@@ -33,35 +32,66 @@ class LiteRtAssistantEngine(
     @Volatile
     private var ready = false
 
+    @Volatile
+    private var lastInitializationError: String? = null
+
+    fun getInitializationError(): String? =
+        lastInitializationError
+
     override suspend fun initialize(): Boolean =
         withContext(dispatcher) {
 
             if (ready) return@withContext true
 
             if (!modelFile.exists() || modelFile.length() == 0L) {
+                lastInitializationError =
+                    "Ficheiro do modelo inexistente ou vazio."
                 return@withContext false
             }
 
-            val candidate = Engine(
-                EngineConfig(
-                    modelPath = modelFile.absolutePath,
-                    backend = Backend.CPU(),
-                    cacheDir = File(
-                        context.cacheDir,
-                        "litert-cache"
-                    ).absolutePath
-                )
-            )
+            var candidate: Engine? = null
 
             try {
+                candidate = Engine(
+                    EngineConfig(
+                        modelPath = modelFile.absolutePath,
+                        backend = Backend.CPU(),
+                        cacheDir = File(
+                            context.cacheDir,
+                            "litert-cache"
+                        ).absolutePath
+                    )
+                )
+
                 candidate.initialize()
 
                 engine = candidate
                 ready = true
+                lastInitializationError = null
 
                 true
+
             } catch (e: Exception) {
                 ready = false
+                engine = null
+
+                lastInitializationError =
+                    "${e.javaClass.simpleName}: ${e.message ?: "Erro sem descrição"}"
+
+                try {
+                    candidate?.close()
+                } catch (_: Exception) {
+                }
+
+                false
+
+            } catch (e: LinkageError) {
+                ready = false
+                engine = null
+
+                lastInitializationError =
+                    "${e.javaClass.simpleName}: ${e.message ?: "Erro de biblioteca nativa"}"
+
                 false
             }
         }
