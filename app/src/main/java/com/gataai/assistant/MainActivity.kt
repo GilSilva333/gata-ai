@@ -20,9 +20,20 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.gataai.assistant.core.ConversationMemory
 import com.gataai.assistant.core.MemoryStore
+import com.gataai.assistant.core.ModelStore
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 import java.util.Locale
 
 class MainActivity : Activity(), TextToSpeech.OnInitListener {
+
+    companion object {
+        private const val MICROPHONE_REQUEST = 100
+        private const val MODEL_PICKER_REQUEST = 200
+    }
 
     private var tts: TextToSpeech? = null
     private var recognizer: SpeechRecognizer? = null
@@ -32,13 +43,19 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private lateinit var conversation: TextView
 
     private lateinit var memoryStore: MemoryStore
+    private lateinit var modelStore: ModelStore
 
     private val memory = ConversationMemory()
+
+    private val activityScope = CoroutineScope(
+        SupervisorJob() + Dispatchers.Main
+    )
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         memoryStore = MemoryStore(this)
+        modelStore = ModelStore(this)
 
         val savedMessages = memoryStore.loadConversation()
 
@@ -80,6 +97,13 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             addView(conversation)
         }
 
+        val importButton = Button(this).apply {
+            text = "🧠 Importar cérebro"
+            setOnClickListener {
+                openModelPicker()
+            }
+        }
+
         val button = Button(this).apply {
             text = "🎙️ Conversar com a Gata"
             setOnClickListener {
@@ -106,14 +130,81 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             )
         )
 
+        layout.addView(importButton)
         layout.addView(button)
         layout.addView(clearButton)
 
         setContentView(layout)
 
         updateConversation()
+        updateModelStatus()
 
         requestMicrophonePermission()
+    }
+
+    private fun openModelPicker() {
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*"
+        }
+
+        try {
+            startActivityForResult(
+                intent,
+                MODEL_PICKER_REQUEST
+            )
+        } catch (e: Exception) {
+            status.text = "Não consegui abrir os ficheiros."
+        }
+    }
+
+    override fun onActivityResult(
+        requestCode: Int,
+        resultCode: Int,
+        data: Intent?
+    ) {
+        super.onActivityResult(requestCode, resultCode, data)
+
+        if (requestCode == MODEL_PICKER_REQUEST &&
+            resultCode == Activity.RESULT_OK
+        ) {
+            val uri = data?.data
+
+            if (uri == null) {
+                status.text = "Não consegui localizar o ficheiro."
+                return
+            }
+
+            importModel(uri)
+        }
+    }
+
+    private fun importModel(uri: android.net.Uri) {
+
+        status.text = "A importar o cérebro... aguarda ❤️"
+
+        activityScope.launch {
+            try {
+                val file = modelStore.importModel(uri)
+
+                status.text =
+                    "Modelo importado! 🧠 " +
+                    "${file.length() / (1024 * 1024)} MB guardados."
+
+            } catch (e: Exception) {
+                status.text =
+                    "Falha na importação: " +
+                    (e.message ?: "erro desconhecido")
+            }
+        }
+    }
+
+    private fun updateModelStatus() {
+        status.text = if (modelStore.hasModel()) {
+            "Cérebro encontrado! 🧠 Ainda falta ativá-lo."
+        } else {
+            "Estou aqui contigo ❤️"
+        }
     }
 
     private fun requestMicrophonePermission() {
@@ -125,7 +216,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             ActivityCompat.requestPermissions(
                 this,
                 arrayOf(Manifest.permission.RECORD_AUDIO),
-                100
+                MICROPHONE_REQUEST
             )
         } else {
             prepareRecognizer()
@@ -140,43 +231,51 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
 
         recognizer = SpeechRecognizer.createSpeechRecognizer(this)
 
-        recognizer?.setRecognitionListener(object : RecognitionListener {
+        recognizer?.setRecognitionListener(
+            object : RecognitionListener {
 
-            override fun onReadyForSpeech(params: Bundle?) {
-                status.text = "Estou a ouvir-te..."
-            }
-
-            override fun onBeginningOfSpeech() {}
-
-            override fun onRmsChanged(rmsdB: Float) {}
-
-            override fun onBufferReceived(buffer: ByteArray?) {}
-
-            override fun onEndOfSpeech() {
-                status.text = "Estou a pensar..."
-            }
-
-            override fun onError(error: Int) {
-                status.text = "Não consegui perceber. Tenta novamente."
-            }
-
-            override fun onResults(results: Bundle?) {
-                val message = results
-                    ?.getStringArrayList(
-                        SpeechRecognizer.RESULTS_RECOGNITION
-                    )?.firstOrNull()
-
-                if (message != null) {
-                    respondTo(message)
-                } else {
-                    status.text = "Podes repetir, meu bem?"
+                override fun onReadyForSpeech(params: Bundle?) {
+                    status.text = "Estou a ouvir-te..."
                 }
+
+                override fun onBeginningOfSpeech() {}
+
+                override fun onRmsChanged(rmsdB: Float) {}
+
+                override fun onBufferReceived(buffer: ByteArray?) {}
+
+                override fun onEndOfSpeech() {
+                    status.text = "Estou a pensar..."
+                }
+
+                override fun onError(error: Int) {
+                    status.text =
+                        "Não consegui perceber. Tenta novamente."
+                }
+
+                override fun onResults(results: Bundle?) {
+                    val message = results
+                        ?.getStringArrayList(
+                            SpeechRecognizer.RESULTS_RECOGNITION
+                        )?.firstOrNull()
+
+                    if (message != null) {
+                        respondTo(message)
+                    } else {
+                        status.text = "Podes repetir, meu bem?"
+                    }
+                }
+
+                override fun onPartialResults(
+                    partialResults: Bundle?
+                ) {}
+
+                override fun onEvent(
+                    eventType: Int,
+                    params: Bundle?
+                ) {}
             }
-
-            override fun onPartialResults(partialResults: Bundle?) {}
-
-            override fun onEvent(eventType: Int, params: Bundle?) {}
-        })
+        )
     }
 
     private fun startListening() {
@@ -341,6 +440,53 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                 TextToSpeech.QUEUE_FLUSH,
                 null,
                 "gata_response"
+            )
+        }
+    }
+
+    override fun onInit(statusCode: Int) {
+        if (statusCode == TextToSpeech.SUCCESS) {
+
+            val result = tts?.setLanguage(
+                Locale("pt", "BR")
+            )
+
+            voiceReady =
+                result != TextToSpeech.LANG_MISSING_DATA &&
+                result != TextToSpeech.LANG_NOT_SUPPORTED
+        }
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(
+            requestCode,
+            permissions,
+            grantResults
+        )
+
+        if (requestCode == MICROPHONE_REQUEST &&
+            grantResults.isNotEmpty() &&
+            grantResults[0] == PackageManager.PERMISSION_GRANTED
+        ) {
+            prepareRecognizer()
+        }
+    }
+
+    override fun onDestroy() {
+        activityScope.cancel()
+
+        recognizer?.destroy()
+        tts?.stop()
+        tts?.shutdown()
+
+        super.onDestroy()
+    }
+}
+nse"
             )
         }
     }
