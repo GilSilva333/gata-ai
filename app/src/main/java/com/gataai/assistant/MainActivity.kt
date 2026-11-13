@@ -6,6 +6,7 @@ import android.app.Activity
 import android.app.AlertDialog
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Bundle
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
@@ -18,6 +19,7 @@ import android.widget.ScrollView
 import android.widget.TextView
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import com.gataai.assistant.ai.LiteRtAssistantEngine
 import com.gataai.assistant.core.ConversationMemory
 import com.gataai.assistant.core.MemoryStore
 import com.gataai.assistant.core.ModelStore
@@ -38,6 +40,9 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private var tts: TextToSpeech? = null
     private var recognizer: SpeechRecognizer? = null
     private var voiceReady = false
+    private var isGenerating = false
+
+    private var aiEngine: LiteRtAssistantEngine? = null
 
     private lateinit var status: TextView
     private lateinit var conversation: TextView
@@ -60,10 +65,9 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         val savedMessages = memoryStore.loadConversation()
 
         savedMessages.forEach { message ->
-            if (message.role == "user") {
-                memory.addUserMessage(message.content)
-            } else if (message.role == "assistant") {
-                memory.addAssistantMessage(message.content)
+            when (message.role) {
+                "user" -> memory.addUserMessage(message.content)
+                "assistant" -> memory.addAssistantMessage(message.content)
             }
         }
 
@@ -140,6 +144,12 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         updateModelStatus()
 
         requestMicrophonePermission()
+
+        if (modelStore.hasModel()) {
+            activityScope.launch {
+                activateAiEngine()
+            }
+        }
     }
 
     private fun openModelPicker() {
@@ -165,7 +175,8 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     ) {
         super.onActivityResult(requestCode, resultCode, data)
 
-        if (requestCode == MODEL_PICKER_REQUEST &&
+        if (
+            requestCode == MODEL_PICKER_REQUEST &&
             resultCode == Activity.RESULT_OK
         ) {
             val uri = data?.data
@@ -179,8 +190,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         }
     }
 
-    private fun importModel(uri: android.net.Uri) {
-
+    private fun importModel(uri: Uri) {
         status.text = "A importar o cérebro... aguarda ❤️"
 
         activityScope.launch {
@@ -188,8 +198,19 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                 val file = modelStore.importModel(uri)
 
                 status.text =
-                    "Modelo importado! 🧠 " +
-                    "${file.length() / (1024 * 1024)} MB guardados."
+                    "Modelo importado! A preparar a inteligência..."
+
+                val activated = activateAiEngine()
+
+                if (activated) {
+                    status.text =
+                        "A GATA está pronta! 🧠❤️"
+                } else {
+                    status.text =
+                        "Modelo guardado, mas não consegui ativá-lo."
+                }
+
+                updateConversation()
 
             } catch (e: Exception) {
                 status.text =
@@ -199,16 +220,55 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         }
     }
 
+    private suspend fun activateAiEngine(): Boolean {
+        if (!modelStore.hasModel()) {
+            return false
+        }
+
+        var engine = aiEngine
+
+        if (engine == null) {
+            engine = LiteRtAssistantEngine(this)
+            aiEngine = engine
+        }
+
+        if (engine.isReady()) {
+            return true
+        }
+
+        status.text = "A carregar o cérebro da GATA... 🧠"
+
+        val initialized = engine.initialize()
+
+        if (!initialized) {
+            engine.release()
+
+            if (aiEngine === engine) {
+                aiEngine = null
+            }
+
+            status.text =
+                "Não consegui carregar o modelo. Vamos tentar novamente."
+
+            return false
+        }
+
+        status.text = "Cérebro ativo! ❤️"
+
+        return true
+    }
+
     private fun updateModelStatus() {
         status.text = if (modelStore.hasModel()) {
-            "Cérebro encontrado! 🧠 Ainda falta ativá-lo."
+            "Cérebro encontrado! A preparar..."
         } else {
             "Estou aqui contigo ❤️"
         }
     }
 
     private fun requestMicrophonePermission() {
-        if (ContextCompat.checkSelfPermission(
+        if (
+            ContextCompat.checkSelfPermission(
                 this,
                 Manifest.permission.RECORD_AUDIO
             ) != PackageManager.PERMISSION_GRANTED
@@ -228,6 +288,8 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             status.text = "Reconhecimento de voz indisponível."
             return
         }
+
+        recognizer?.destroy()
 
         recognizer = SpeechRecognizer.createSpeechRecognizer(this)
 
@@ -257,7 +319,8 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                     val message = results
                         ?.getStringArrayList(
                             SpeechRecognizer.RESULTS_RECOGNITION
-                        )?.firstOrNull()
+                        )
+                        ?.firstOrNull()
 
                     if (message != null) {
                         respondTo(message)
@@ -279,12 +342,18 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     }
 
     private fun startListening() {
-        if (ContextCompat.checkSelfPermission(
+        if (
+            ContextCompat.checkSelfPermission(
                 this,
                 Manifest.permission.RECORD_AUDIO
             ) != PackageManager.PERMISSION_GRANTED
         ) {
             requestMicrophonePermission()
+            return
+        }
+
+        if (isGenerating) {
+            status.text = "Espera só um bocadinho, estou a responder ❤️"
             return
         }
 
@@ -320,14 +389,61 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     }
 
     private fun respondTo(message: String) {
+        if (isGenerating) {
+            status.text = "Ainda estou a responder à mensagem anterior."
+            return
+        }
 
         val previousMessage = memory.getMessages()
             .lastOrNull { it.role == "user" }
             ?.content ?: ""
 
+        memory.addUserMessage(message)
+
+        memoryStore.saveConversation(memory.getMessages())
+        updateConversation()
+
+        isGenerating = true
+        status.text = "A GATA está a pensar... 🧠"
+
+        activityScope.launch {
+            val answer = try {
+                if (modelStore.hasModel()) {
+                    val activated = activateAiEngine()
+
+                    if (activated) {
+                        aiEngine!!.generateResponse(
+                            memory.getMessages()
+                        )
+                    } else {
+                        scriptedResponse(message, previousMessage)
+                    }
+                } else {
+                    scriptedResponse(message, previousMessage)
+                }
+            } catch (e: Exception) {
+                scriptedResponse(message, previousMessage)
+            }
+
+            memory.addAssistantMessage(answer)
+
+            memoryStore.saveConversation(memory.getMessages())
+            updateConversation()
+
+            isGenerating = false
+            status.text = "Conversa ativa ❤️"
+
+            speak(answer)
+        }
+    }
+
+    private fun scriptedResponse(
+        message: String,
+        previousMessage: String
+    ): String {
         val input = message.lowercase(Locale.ROOT)
 
-        val answer = when {
+        return when {
 
             input.contains("oi") ||
             input.contains("olá") ||
@@ -348,6 +464,136 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                 if (previousMessage.isNotEmpty()) {
                     "Antes disseste: $previousMessage"
                 } else {
+                    "Ainda não tenho outra mensagem tua nesta conversa."
+                }
+
+            input.contains("lembras") ||
+            input.contains("lembraste") ->
+                if (previousMessage.isNotEmpty()) {
+                    "Sim, lembro-me de teres dito: $previousMessage"
+                } else {
+                    "Ainda estamos a começar a nossa conversa!"
+                }
+
+            input.contains("obrigado") ||
+            input.contains("obrigada") ->
+                "Não tens de quê, meu bem! Estou aqui."
+
+            input.contains("estou triste") ||
+            input.contains("estou mal") ->
+                "Oh, meu bem... Queres contar-me o que aconteceu? Estou a ouvir."
+
+            input.contains("estou feliz") ||
+            input.contains("estou contente") ->
+                "Aeee! Adoro saber disso! O que aconteceu de bom?"
+
+            input.contains("tchau") ||
+            input.contains("adeus") ->
+                "Até logo! Quando voltares, continuamos a nossa conversa."
+
+            input.contains("continua") ->
+                "Claro! Estávamos a conversar. Conta-me mais."
+
+            else ->
+                "Entendi. Conta-me mais sobre isso, quero compreender melhor o que estás a dizer."
+        }
+    }
+
+    private fun updateConversation() {
+        val messages = memory.getMessages()
+
+        conversation.text = if (messages.isEmpty()) {
+            "Gata: Oiii! Podemos conversar."
+        } else {
+            messages.joinToString("\n\n") { message ->
+                val speaker = if (message.role == "user") {
+                    "Tu"
+                } else {
+                    "Gata"
+                }
+
+                "$speaker: ${message.content}"
+            }
+        }
+    }
+
+    private fun confirmClearHistory() {
+        AlertDialog.Builder(this)
+            .setTitle("Apagar histórico?")
+            .setMessage(
+                "Queres mesmo apagar todas as mensagens guardadas?"
+            )
+            .setNegativeButton("Cancelar", null)
+            .setPositiveButton("Apagar") { _, _ ->
+
+                memory.clear()
+                memoryStore.clearConversation()
+
+                updateConversation()
+
+                status.text = "Histórico apagado ❤️"
+            }
+            .show()
+    }
+
+    private fun speak(message: String) {
+        if (voiceReady) {
+            tts?.speak(
+                message,
+                TextToSpeech.QUEUE_FLUSH,
+                null,
+                "gata_response"
+            )
+        }
+    }
+
+    override fun onInit(statusCode: Int) {
+        if (statusCode == TextToSpeech.SUCCESS) {
+            val result = tts?.setLanguage(
+                Locale("pt", "BR")
+            )
+
+            voiceReady =
+                result != TextToSpeech.LANG_MISSING_DATA &&
+                result != TextToSpeech.LANG_NOT_SUPPORTED
+        }
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(
+            requestCode,
+            permissions,
+            grantResults
+        )
+
+        if (
+            requestCode == MICROPHONE_REQUEST &&
+            grantResults.isNotEmpty() &&
+            grantResults[0] == PackageManager.PERMISSION_GRANTED
+        ) {
+            prepareRecognizer()
+        }
+    }
+
+    override fun onDestroy() {
+        activityScope.cancel()
+
+        recognizer?.destroy()
+
+        tts?.stop()
+        tts?.shutdown()
+
+        aiEngine?.release()
+        aiEngine = null
+
+        super.onDestroy()
+    }
+}
+   } else {
                     "Ainda não tenho outra mensagem tua nesta conversa."
                 }
 
