@@ -593,4 +593,3 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         super.onDestroy()
     }
 }
-   }
